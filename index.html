@@ -5,6 +5,29 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>ระบบจัดการโครงการ</title>
 <link href="https://fonts.googleapis.com/css2?family=Sarabun:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+<!-- Firebase SDK v9+ (Modular) -->
+<script type="module">
+  import { initializeApp } from "https://www.gstatic.com/firebasejs/10.7.0/firebase-app.js";
+  import { getDatabase, ref, set, get, onValue, remove } from "https://www.gstatic.com/firebasejs/10.7.0/firebase-database.js";
+
+  const firebaseConfig = {
+    apiKey: "AIzaSyDbLiSuNtPFa5Ts39mtnsRetcTzGWCyoSc",
+    authDomain: "project-budget-c0d1f.firebaseapp.com",
+    databaseURL: "https://project-budget-c0d1f-default-rtdb.asia-southeast1.firebasedatabase.app",
+    projectId: "project-budget-c0d1f",
+    storageBucket: "project-budget-c0d1f.appspot.com",
+    messagingSenderId: "279200668336",
+    appId: "1:279200668336:web:05dbcccd513d398886f975"
+  };
+
+  const app = initializeApp(firebaseConfig);
+  const db = getDatabase(app);
+
+  // Export for use in main script
+  window.firebaseDB = { db, ref, set, get, onValue, remove };
+  window.firebaseReady = true;
+  console.log('✅ Firebase initialized successfully');
+</script>
 <style>
   :root {
     --blue-dark: #1a3a5c;
@@ -778,8 +801,6 @@
 
 <script>
 // ===== CONSTANTS =====
-const STORAGE_KEY = 'projects_data_v2';
-const PRESENCE_KEY = 'presence_users';
 const LOCK_PREFIX = 'lock_project:';
 const MY_SESSION = 'sess_' + Math.random().toString(36).slice(2,8);
 const POLL_INTERVAL = 4000; // 4 seconds
@@ -937,7 +958,48 @@ function showToast(msg, type='info', duration=2500) {
   toastTimer = setTimeout(() => t.className = '', duration);
 }
 
-// ===== CLOUD STORAGE HELPERS =====
+// ===== FIREBASE SETUP (loaded via module above) =====
+// Wait for Firebase to initialize
+async function waitForFirebase() {
+  return new Promise((resolve) => {
+    const checkInterval = setInterval(() => {
+      if (window.firebaseReady && window.firebaseDB) {
+        clearInterval(checkInterval);
+        resolve();
+      }
+    }, 100);
+    // Timeout after 5 seconds
+    setTimeout(() => { clearInterval(checkInterval); resolve(); }, 5000);
+  });
+}
+
+let db = null;
+let firebaseRef = null;
+let firebaseSet = null;
+let firebaseGet = null;
+let firebaseRemove = null;
+
+// Initialize on startup
+(async () => {
+  await waitForFirebase();
+  if (window.firebaseDB) {
+    db = window.firebaseDB.db;
+    firebaseRef = window.firebaseDB.ref;
+    firebaseSet = window.firebaseDB.set;
+    firebaseGet = window.firebaseDB.get;
+    firebaseRemove = window.firebaseDB.remove;
+    console.log('✅ Firebase functions ready');
+  } else {
+    console.error('❌ Firebase failed to initialize');
+  }
+})();
+
+// ===== FIREBASE CONFIG (no longer needed - loaded above) =====
+// const firebaseConfig = {...}
+// firebase.initializeApp(firebaseConfig);
+// const db = firebase.database();
+
+// ===== CLOUD STORAGE HELPERS (Firebase) =====
 function setStatus(state, text) {
   const el = document.getElementById('cloudStatus');
   const txt = document.getElementById('cloudStatusText');
@@ -948,15 +1010,16 @@ function setStatus(state, text) {
 async function saveToCloud(data) {
   setStatus('saving', 'กำลังบันทึก...');
   try {
-    const payload = JSON.stringify({ projects: data, timestamp: Date.now(), version: nextId });
-    const result = await window.storage.set(STORAGE_KEY, payload, true);
-    if (!result) throw new Error('Storage set returned null');
+    if (!db) throw new Error('Firebase not initialized');
+    const payload = { projects: data, timestamp: Date.now(), version: nextId };
+    await firebaseSet(firebaseRef(db, 'projects_data'), payload);
     lastKnownTimestamp = Date.now();
     setStatus('', 'บันทึกแล้ว ✓');
     const now = new Date().toLocaleTimeString('th-TH');
     document.getElementById('lastSaveInfo').textContent = 'บันทึกล่าสุด: ' + now + ' น. โดย ' + myUserName;
     return true;
   } catch (e) {
+    console.error('Save error:', e);
     setStatus('error', 'บันทึกไม่สำเร็จ ⚠️');
     showToast('❌ บันทึกไม่สำเร็จ: ' + e.message, 'error', 4000);
     return false;
@@ -965,41 +1028,43 @@ async function saveToCloud(data) {
 
 async function loadFromCloud() {
   try {
-    const result = await window.storage.get(STORAGE_KEY, true);
-    if (!result || !result.value) return null;
-    return JSON.parse(result.value);
+    if (!db) return null;
+    const snapshot = await firebaseGet(firebaseRef(db, 'projects_data'));
+    if (!snapshot.exists()) return null;
+    return snapshot.val();
   } catch (e) {
+    console.error('Load error:', e);
     return null;
   }
 }
 
-// ===== PRESENCE HELPERS =====
+// ===== PRESENCE HELPERS (Firebase) =====
 async function updatePresence(editId = null) {
   try {
+    if (!db) return;
     const data = { name: myUserName, time: Date.now(), editingId: editId, session: MY_SESSION };
-    await window.storage.set(PRESENCE_KEY + ':' + MY_SESSION, JSON.stringify(data), true);
-  } catch(e) {}
+    await firebaseSet(firebaseRef(db, 'presence/' + MY_SESSION), data);
+  } catch(e) { console.error('Presence error:', e); }
 }
 
 async function loadPresence() {
   try {
-    const keys = await window.storage.list(PRESENCE_KEY + ':', true);
-    if (!keys || !keys.keys) return {};
+    if (!db) return {};
+    const snapshot = await firebaseGet(firebaseRef(db, 'presence'));
+    if (!snapshot.exists()) return {};
     const now = Date.now();
     const alive = {};
-    for (const k of keys.keys) {
-      try {
-        const r = await window.storage.get(k, true);
-        if (r && r.value) {
-          const u = JSON.parse(r.value);
-          if (now - u.time < 20000) { // 20 sec timeout
-            alive[u.session] = u;
-          }
-        }
-      } catch(e) {}
+    const data = snapshot.val();
+    for (const [key, user] of Object.entries(data)) {
+      if (now - user.time < 20000) { // 20 sec timeout
+        alive[user.session] = user;
+      }
     }
     return alive;
-  } catch(e) { return {}; }
+  } catch(e) { 
+    console.error('Presence load error:', e);
+    return {}; 
+  }
 }
 
 function renderPresence(pmap) {
@@ -1391,7 +1456,11 @@ document.addEventListener('keydown', e => {
 // Heartbeat on unload
 window.addEventListener('beforeunload', () => {
   if (pollTimer) clearInterval(pollTimer);
-  try { window.storage.delete(PRESENCE_KEY + ':' + MY_SESSION, true); } catch(e) {}
+  try { 
+    if (db && firebaseRemove) {
+      firebaseRemove(firebaseRef(db, 'presence/' + MY_SESSION));
+    }
+  } catch(e) {}
 });
 
 // ===== START =====
